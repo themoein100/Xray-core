@@ -49,6 +49,7 @@ type stackGVisor struct {
 	handler     *Handler
 	stack       *stack.Stack
 	endpoint    stack.LinkEndpoint
+	udp         *udpConnectionHandler
 }
 
 // NewStack builds new ip stack (using gVisor)
@@ -109,6 +110,7 @@ func (t *stackGVisor) Start() error {
 
 	// Use custom UDP packet handler, instead of strict gVisor forwarder, for FullCone NAT support
 	udpForwarder := newUdpConnectionHandler(t.handler.HandleConnection, t.writeRawUDPPacket)
+	t.udp = udpForwarder
 	ipStack.SetTransportProtocolHandler(udp.ProtocolNumber, func(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
 		data := pkt.Clone().Data().AsRange().ToSlice()
 		// if len(data) == 0 {
@@ -208,6 +210,11 @@ func (t *stackGVisor) Close() error {
 	t.stack.Close()
 	for _, endpoint := range t.stack.CleanupEndpoints() {
 		endpoint.Abort()
+	}
+	// UDP flows are not gVisor endpoints (they bypass its forwarder for full-cone NAT), so the
+	// cleanup above never reaches them.
+	if t.udp != nil {
+		t.udp.closeAll()
 	}
 
 	return nil
