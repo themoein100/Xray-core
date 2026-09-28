@@ -31,6 +31,10 @@ const (
 	defaultDarwinGateway = "169.254.10.1/30"
 	utunHeaderSize       = 4
 	UTUN_OPT_IFNAME      = 2
+
+	// Bounded wait for a full datagram queue in WritePacket: at most ~5 ms per packet.
+	writeRetryAttempts = 20
+	writeRetryDelay    = 250 * time.Microsecond
 )
 
 const (
@@ -294,13 +298,27 @@ func (t *DarwinTun) WritePacket(packet *stack.PacketBuffer) tcpip.Error {
 	}
 	b.SetByte(3, family)
 
-	if _, err := t.tunFile.Write(b.Bytes()); err != nil {
-		if errors.Is(err, unix.EAGAIN) {
+	data := b.Bytes()
+	for attempt := 0; ; attempt++ {
+		_, err := t.tunFile.Write(data)
+		if err == nil {
+			return nil
+		}
+		// On iOS this fd is one end of an AF_UNIX datagram socketpair. When the reader's queue is
+		// full, Darwin fails the write with ENOBUFS (not EAGAIN), and poll still reports the socket
+		// writable, so the runtime poller never waits for it. Returning an error here drops the
+		// packet and makes the app's TCP back off. Give the reader a few milliseconds to drain
+		// first; the bound keeps a stalled reader from pinning gVisor's writer.
+		full := errors.Is(err, unix.ENOBUFS) || errors.Is(err, unix.EAGAIN)
+		if full && attempt < writeRetryAttempts {
+			time.Sleep(writeRetryDelay)
+			continue
+		}
+		if full {
 			return &tcpip.ErrWouldBlock{}
 		}
 		return &tcpip.ErrAborted{}
 	}
-	return nil
 }
 
 // ReadPacket implements GVisorDevice method to read one packet from the tun device
