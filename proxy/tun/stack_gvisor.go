@@ -23,13 +23,22 @@ import (
 const (
 	defaultNIC tcpip.NICID = 1
 
+	// Sized for a local TUN link inside a memory-capped iOS Network Extension (jetsam at ~50 MB for
+	// the whole process). These buffers are live Go heap — no GC or memory limit can reclaim them —
+	// and they are per connection and per direction. At 1 MiB default / 2 MiB max, an image-heavy
+	// feed opening 20–40 connections at once filled them faster than anything could react: device
+	// runs went 34 → 48 MB in ten seconds and the extension was killed.
+	//
+	// The link to the app has near-zero RTT, so the bandwidth-delay product is tiny: 256 KiB still
+	// carries well over 100 MB/s per connection at a 2 ms round trip. gVisor requires
+	// Min <= Default <= Max.
 	tcpRXBufMinSize = tcp.MinBufferSize
-	tcpRXBufDefSize = tcp.DefaultSendBufferSize
-	tcpRXBufMaxSize = 8 << 20 // 8MiB
+	tcpRXBufDefSize = 128 << 10 // 128KiB
+	tcpRXBufMaxSize = 256 << 10 // 256KiB
 
 	tcpTXBufMinSize = tcp.MinBufferSize
-	tcpTXBufDefSize = tcp.DefaultReceiveBufferSize
-	tcpTXBufMaxSize = 6 << 20 // 6MiB
+	tcpTXBufDefSize = 128 << 10 // 128KiB
+	tcpTXBufMaxSize = 256 << 10 // 256KiB
 )
 
 // stackGVisor is ip stack implemented by gVisor package
