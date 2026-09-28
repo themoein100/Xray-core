@@ -223,7 +223,7 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, d internet.
 		cancel()
 		conn.Close()
 	}
-	timer := signal.CancelAfterInactivity(ctx, terminate, h.timeout)
+	timer := signal.CancelAfterInactivity(ctx, terminate, sessionIdleTimeout(srcNetwork, h.timeout))
 	defer timer.SetTimeout(0)
 
 	request := func() error {
@@ -308,6 +308,26 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, d internet.
 	}
 
 	return nil
+}
+
+// udpDNSSessionIdle bounds how long a UDP DNS flow lives without traffic.
+//
+// Stub resolvers (iOS's included) send each query from a fresh source port, so
+// every query is its own flow, and a flow is finished once its answer is sent.
+// Under the general connection-idle timeout (minutes) each one kept its
+// goroutines, its tun flow and — when the query is answered by the built-in
+// resolver, so no outbound connection is ever dialed — a reader parked on
+// connReady for the whole period. An app resolving hundreds of names left
+// hundreds of these alive at once, enough to push an iOS Network Extension
+// into jetsam. A resolver retrying on the same port keeps the flow alive,
+// because every message resets the timer.
+const udpDNSSessionIdle = 5 * time.Second
+
+func sessionIdleTimeout(srcNetwork net.Network, connIdle time.Duration) time.Duration {
+	if srcNetwork == net.Network_UDP && (connIdle <= 0 || connIdle > udpDNSSessionIdle) {
+		return udpDNSSessionIdle
+	}
+	return connIdle
 }
 
 func (h *Handler) handleIPQuery(id uint16, qType dnsmessage.Type, domain string, writer dns_proto.MessageWriter, timer *signal.ActivityTimer) {
