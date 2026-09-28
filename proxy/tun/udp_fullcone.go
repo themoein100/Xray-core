@@ -16,6 +16,8 @@ type udpConnectionHandler struct {
 	sync.RWMutex
 
 	udpConns map[net.Destination]*udpConn
+	// closed is set by closeAll when the stack shuts down; no new flows are accepted after it.
+	closed bool
 
 	handleConnection func(conn net.Conn, dest net.Destination)
 	writePacket      func(data []byte, src net.Destination, dst net.Destination) error
@@ -51,6 +53,11 @@ func (u *udpConnectionHandler) HandlePacket(src net.Destination, dst net.Destina
 	u.Lock()
 	defer u.Unlock()
 
+	if u.closed {
+		data.Release()
+		return
+	}
+
 	conn, found = u.udpConns[src]
 	if !found {
 		conn = &udpConn{handler: u, queue: newPacketQueue(udpQueueLimit), src: src, dst: dst}
@@ -64,6 +71,22 @@ func (u *udpConnectionHandler) HandlePacket(src net.Destination, dst net.Destina
 		errors.LogDebug(context.Background(), "drop udp with size ", data.Len(), " to ", dst.NetAddr(), " original ", conn.dst.NetAddr(), " > queue full 2")
 		data.Release()
 	}
+}
+
+// closeAll ends every live UDP flow. Each flow's handler goroutine is parked in
+// ReadMultiBuffer on its queue and only a close releases it, so without this
+// every flow outlives the stack that created it. On iOS the core is restarted
+// in place, and a device run found ~235 such flows (each holding its DNS
+// session and goroutines) still alive after the core had been stopped.
+func (u *udpConnectionHandler) closeAll() {
+	u.Lock()
+	u.closed = true
+	conns := u.udpConns
+	u.udpConns = make(map[net.Destination]*udpConn)
+	for _, conn := range conns {
+		conn.queue.close()
+	}
+	u.Unlock()
 }
 
 func (u *udpConnectionHandler) connectionFinished(conn *udpConn) {

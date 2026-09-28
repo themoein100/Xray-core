@@ -144,6 +144,10 @@ func (s *stack) Close() error {
 	for _, u := range sockets {
 		u.queue.close()
 	}
+	// full-cone UDP flows are not tracked in conns or sockets, so nothing above reaches them
+	if s.udp != nil {
+		s.udp.closeAll()
+	}
 	return nil
 }
 
