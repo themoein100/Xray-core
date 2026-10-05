@@ -226,7 +226,8 @@ func (v *ShadowsocksClientConfig) Build() (proto.Message, error) {
 		return nil, errors.New("Shadowsocks password is not specified.")
 	}
 
-	if _, err := shadowsocks_2022.GetCipherMethod(server.Cipher); err == nil {
+	// Legacy stream ciphers are served by the 2022 outbound's sing-based client.
+	if _, err := shadowsocks_2022.GetCipherMethod(server.Cipher); err == nil || shadowsocks_2022.IsLegacyStreamMethod(server.Cipher) {
 		config := new(shadowsocks_2022.ClientConfig)
 		config.Address = server.Address.Build()
 		config.Port = uint32(server.Port)
