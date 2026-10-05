@@ -6,6 +6,7 @@ import (
 
 	shadowsocks "github.com/sagernet/sing-shadowsocks"
 	"github.com/sagernet/sing-shadowsocks/shadowaead_2022"
+	"github.com/sagernet/sing-shadowsocks/shadowstream"
 	C "github.com/sagernet/sing/common"
 	B "github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
@@ -47,6 +48,13 @@ func NewClient(ctx context.Context, config *ClientConfig) (*Outbound, error) {
 			return nil, errors.New("missing psk")
 		}
 		method, err := shadowaead_2022.NewWithPassword(config.Method, config.Key, nil)
+		if err != nil {
+			return nil, errors.New("create method").Base(err)
+		}
+		o.method = method
+	} else if C.Contains(shadowstream.List, config.Method) {
+		// Client-only support for legacy stream ciphers; Key carries the password.
+		method, err := shadowstream.New(config.Method, nil, config.Key)
 		if err != nil {
 			return nil, errors.New("create method").Base(err)
 		}

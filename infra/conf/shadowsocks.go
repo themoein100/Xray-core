@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/sagernet/sing-shadowsocks/shadowaead_2022"
+	"github.com/sagernet/sing-shadowsocks/shadowstream"
 	C "github.com/sagernet/sing/common"
 	"github.com/xtls/xray-core/common/errors"
 	"github.com/xtls/xray-core/common/protocol"
@@ -216,7 +217,9 @@ func (v *ShadowsocksClientConfig) Build() (proto.Message, error) {
 
 	if len(v.Servers) == 1 {
 		server := v.Servers[0]
-		if C.Contains(shadowaead_2022.List, server.Cipher) {
+		// Legacy stream ciphers (aes-*-cfb, rc4-md5, chacha20, ...) are still served by
+		// many public servers; the sing-based client speaks them, so they go the same way.
+		if C.Contains(shadowaead_2022.List, server.Cipher) || C.Contains(shadowstream.List, server.Cipher) {
 			if server.Address == nil {
 				return nil, errors.New("Shadowsocks server address is not set.")
 			}
