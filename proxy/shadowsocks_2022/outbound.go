@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"io"
 
+	shadowsocks "github.com/sagernet/sing-shadowsocks"
 	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
@@ -32,9 +33,15 @@ type Outbound struct {
 	finalPSK      []byte
 	udpCodec      *UDPPacketCodec
 	policyManager policy.Manager
+	// legacy is set instead of method for the pre-AEAD stream ciphers; see legacy_stream.go
+	legacy shadowsocks.Method
 }
 
 func NewClient(ctx context.Context, config *ClientConfig) (*Outbound, error) {
+	if IsLegacyStreamMethod(config.Method) {
+		return newLegacyStreamClient(ctx, config)
+	}
+
 	method, err := GetCipherMethod(config.Method)
 	if err != nil {
 		return nil, errors.New("unsupported method: ", config.Method).Base(err)
@@ -118,6 +125,10 @@ func (o *Outbound) Process(ctx context.Context, link *transport.Link, dialer int
 
 	if newCtx != nil {
 		ctx = newCtx
+	}
+
+	if o.legacy != nil {
+		return o.processLegacyStream(ctx, link, conn, destination, timer, sessionPolicy)
 	}
 
 	if network == net.Network_TCP {
