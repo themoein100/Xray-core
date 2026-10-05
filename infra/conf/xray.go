@@ -234,6 +234,11 @@ func requiresTransportSecurity(address *Address) bool {
 }
 
 func validateOutboundTransportSecurity(rawConfig interface{}, senderSettings *proxyman.SenderConfig) error {
+	// Panel configs deliberately use plain VLESS/Trojan (e.g. HTTP-header camouflage on public IPs),
+	// so the upstream hard rejection is opt-in here.
+	if os.Getenv("XRAY_REQUIRE_OUTBOUND_SECURITY") != "1" {
+		return nil
+	}
 	if senderSettings.StreamSettings != nil && senderSettings.StreamSettings.GetSecurityType() != "" {
 		return nil
 	}
