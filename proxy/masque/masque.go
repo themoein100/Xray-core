@@ -42,10 +42,12 @@ import (
 const (
 	defaultSNI      = "consumer-masque.cloudflareclient.com"
 	connectURI      = "https://cloudflareaccess.com"
-	defaultMTU      = 1280
+	maxInnerMTU     = 1150
 	keepalive       = 30 * time.Second
 	reconnectDelay  = time.Second
 	firstConnectMax = 10 * time.Second
+	idleLinger      = 90 * time.Second
+	dnsTimeout      = 4 * time.Second
 )
 
 func init() {
@@ -113,9 +115,10 @@ var (
 )
 
 type tunnel struct {
-	key  string
-	refs int
-	conf *Config
+	key       string
+	refs      int
+	idleTimer *time.Timer
+	conf      *Config
 
 	mu      sync.Mutex
 	cancel  context.CancelFunc
@@ -130,6 +133,10 @@ func acquire(conf *Config) (*tunnel, error) {
 	tunnelsMu.Lock()
 	defer tunnelsMu.Unlock()
 	if t, ok := tunnels[key]; ok {
+		if t.idleTimer != nil {
+			t.idleTimer.Stop()
+			t.idleTimer = nil
+		}
 		t.refs++
 		return t, nil
 	}
@@ -141,6 +148,11 @@ func acquire(conf *Config) (*tunnel, error) {
 	return t, nil
 }
 
+// release keeps an unused tunnel open for idleLinger before closing it. Pings
+// run in short-lived Xray instances and a connect follows a ping within seconds;
+// tearing the tunnel down with each instance made every one of them pay a fresh
+// QUIC + CONNECT-IP handshake, which from a slow network did not fit inside a
+// ping's deadline at all.
 func release(t *tunnel) {
 	tunnelsMu.Lock()
 	defer tunnelsMu.Unlock()
@@ -148,9 +160,16 @@ func release(t *tunnel) {
 	if t.refs > 0 {
 		return
 	}
-	delete(tunnels, t.key)
-	t.cancel()
-	t.tunDev.Close()
+	t.idleTimer = time.AfterFunc(idleLinger, func() {
+		tunnelsMu.Lock()
+		defer tunnelsMu.Unlock()
+		if t.refs > 0 || tunnels[t.key] != t {
+			return
+		}
+		delete(tunnels, t.key)
+		t.cancel()
+		t.tunDev.Close()
+	})
 }
 
 // wait blocks (bounded) until the first connection is up, so the first request
@@ -206,9 +225,14 @@ func (t *tunnel) launch() error {
 	if len(dns) == 0 {
 		dns = []netip.Addr{netip.MustParseAddr("1.1.1.1"), netip.MustParseAddr("2606:4700:4700::1111")}
 	}
+	// Every inner IP packet travels in one QUIC DATAGRAM, and those are capped by
+	// the QUIC packet size, which starts at 1200 bytes (see maintain). A bigger
+	// inner packet is dropped without an error the stack can see: a TCP connection
+	// then stalls on its first full-size segment — a TLS ClientHello with a
+	// post-quantum key share is one. Keep the stack below what fits.
 	mtu := int(t.conf.Mtu)
-	if mtu <= 0 {
-		mtu = defaultMTU
+	if mtu <= 0 || mtu > maxInnerMTU {
+		mtu = maxInnerMTU
 	}
 
 	cert, err := selfSignedCert(privKey)
@@ -343,13 +367,9 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 
 	var addr netip.Addr
 	if ob.Target.Address.Family().IsDomain() {
-		ips, err := t.tnet.LookupContextHost(ctx, ob.Target.Address.Domain())
-		if err != nil || len(ips) == 0 {
-			return xerrors.New("masque: failed to resolve ", ob.Target.Address.Domain()).Base(err)
-		}
-		addr, err = netip.ParseAddr(ips[0])
+		addr, err = t.resolve(ctx, ob.Target.Address.Domain())
 		if err != nil {
-			return err
+			return xerrors.New("masque: failed to resolve ", ob.Target.Address.Domain()).Base(err)
 		}
 	} else {
 		addr, _ = netip.AddrFromSlice(ob.Target.Address.IP())
@@ -396,6 +416,34 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		return xerrors.New("connection ends").Base(err)
 	}
 	return nil
+}
+
+// resolve looks the name up inside the tunnel and prefers IPv4, which every WARP
+// exit carries; IPv6 egress is not guaranteed on every account and path.
+func (t *tunnel) resolve(ctx context.Context, host string) (netip.Addr, error) {
+	lookupCtx, cancel := context.WithTimeout(ctx, dnsTimeout)
+	defer cancel()
+	ips, err := t.tnet.LookupContextHost(lookupCtx, host)
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	var v6 netip.Addr
+	for _, s := range ips {
+		ip, err := netip.ParseAddr(s)
+		if err != nil {
+			continue
+		}
+		if ip.Is4() || ip.Is4In6() {
+			return ip.Unmap(), nil
+		}
+		if !v6.IsValid() {
+			v6 = ip
+		}
+	}
+	if v6.IsValid() {
+		return v6, nil
+	}
+	return netip.Addr{}, errors.New("no address")
 }
 
 func parsePrivateKey(b64 string) (*ecdsa.PrivateKey, error) {
