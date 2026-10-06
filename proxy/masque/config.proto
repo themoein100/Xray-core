@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package xray.proxy.masque;
+option csharp_namespace = "Xray.Proxy.Masque";
+option go_package = "github.com/xtls/xray-core/proxy/masque";
+option java_package = "com.xray.proxy.masque";
+option java_multiple_files = true;
+
+// Cloudflare WARP over MASQUE (HTTP/3 CONNECT-IP).
+message Config {
+  // Base64 DER of the device's P-256 key (SEC1 or PKCS#8), enrolled on the WARP account.
+  string private_key = 1;
+  // PEM of the endpoint's P-256 public key, from the account's peer config. Pins the server.
+  string endpoint_public_key = 2;
+  // host:port of the MASQUE endpoint (UDP).
+  string endpoint = 3;
+  // TLS server name; defaults to consumer-masque.cloudflareclient.com.
+  string sni = 4;
+  // Tunnel addresses assigned to the account (IPv4 and/or IPv6, no prefix).
+  repeated string addresses = 5;
+  int32 mtu = 6;
+  // Resolvers used inside the tunnel for domain targets.
+  repeated string dns = 7;
+}
