@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package xray.transport.internet.finalmask.obfs4;
+option csharp_namespace = "Xray.Transport.Internet.Finalmask.Obfs4";
+option go_package = "github.com/xtls/xray-core/transport/internet/finalmask/obfs4";
+option java_package = "com.xray.transport.internet.finalmask.obfs4";
+option java_multiple_files = true;
+
+message Config {
+  string cert = 1;
+  int32 iat_mode = 2;
+}

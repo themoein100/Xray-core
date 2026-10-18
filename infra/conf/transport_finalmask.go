@@ -24,6 +24,7 @@ import (
 	"github.com/xtls/xray-core/transport/internet/finalmask/mkcp/header"
 	"github.com/xtls/xray-core/transport/internet/finalmask/mkcp/original"
 	"github.com/xtls/xray-core/transport/internet/finalmask/noise"
+	"github.com/xtls/xray-core/transport/internet/finalmask/obfs4"
 	"github.com/xtls/xray-core/transport/internet/finalmask/realm"
 	"github.com/xtls/xray-core/transport/internet/finalmask/salamander"
 	"github.com/xtls/xray-core/transport/internet/finalmask/sudoku"
@@ -78,6 +79,7 @@ var (
 		"fragment":      func() interface{} { return new(FragmentMask) },
 		"sudoku":        func() interface{} { return new(Sudoku) },
 		"xmc":           func() interface{} { return new(XMC) },
+		"obfs4":         func() interface{} { return new(Obfs4) },
 	}, "type", "settings")
 
 	udpmaskLoader = NewJSONConfigLoader(ConfigCreatorCache{
@@ -807,6 +809,21 @@ func (c *Sudoku) Build() (proto.Message, error) {
 		PaddingMin:   paddingMin,
 		PaddingMax:   paddingMax,
 	}, nil
+}
+
+type Obfs4 struct {
+	Cert    string `json:"cert"`
+	IatMode int32  `json:"iatMode"`
+}
+
+func (c *Obfs4) Build() (proto.Message, error) {
+	if c.Cert == "" {
+		return nil, errors.New("obfs4 cert is empty")
+	}
+	if c.IatMode < 0 || c.IatMode > 2 {
+		return nil, errors.New("obfs4 iatMode must be 0, 1 or 2")
+	}
+	return &obfs4.Config{Cert: c.Cert, IatMode: c.IatMode}, nil
 }
 
 type XDNSDomain struct {
