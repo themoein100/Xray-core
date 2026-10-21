@@ -55,6 +55,8 @@ var (
 		"trojan":      func() interface{} { return new(TrojanClientConfig) },
 		"hysteria":    func() interface{} { return new(HysteriaClientConfig) },
 		"masque":      func() interface{} { return new(MasqueClientConfig) },
+		// Cloudflare WARP over MASQUE (proxy/warpmasque); "masque" is upstream's generic CONNECT-IP client.
+		"warp-masque": func() interface{} { return new(WarpMasqueConfig) },
 		"dns":         func() interface{} { return new(DNSOutboundConfig) },
 		"wireguard":   func() interface{} { return &WireGuardConfig{IsClient: true} },
 	}, "protocol", "settings")

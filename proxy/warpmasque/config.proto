@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package xray.proxy.warpmasque;
+option csharp_namespace = "Xray.Proxy.Warpmasque";
+option go_package = "github.com/xtls/xray-core/proxy/warpmasque";
+option java_package = "com.xray.proxy.warpmasque";
+option java_multiple_files = true;
+
+// Cloudflare WARP over MASQUE (HTTP/3 CONNECT-IP).
+message Config {
+  // Base64 DER of the device's P-256 key (SEC1 or PKCS#8), enrolled on the WARP account.
+  string private_key = 1;
+  // PEM of the endpoint's P-256 public key, from the account's peer config. Pins the server.
+  string endpoint_public_key = 2;
+  // host:port of the MASQUE endpoint (UDP).
+  string endpoint = 3;
+  // TLS server name; defaults to consumer-masque.cloudflareclient.com.
+  string sni = 4;
+  // Tunnel addresses assigned to the account (IPv4 and/or IPv6, no prefix).
+  repeated string addresses = 5;
+  int32 mtu = 6;
+  // Resolvers used inside the tunnel for domain targets.
+  repeated string dns = 7;
+  // "h3" (default, QUIC over UDP) or "h2" (HTTP/2 over TLS/TCP, for networks that block QUIC).
+  string transport = 8;
+  // Split the TLS ClientHello of the h2 transport into small TCP writes.
+  bool fragment = 9;
+  // Chunk size in bytes, "n" or "a-b" (default 8-16).
+  string fragment_size = 10;
+  // Pause between chunks in milliseconds, "n" or "a-b" (default 2-10).
+  string fragment_delay = 11;
+  // TLS key-share groups, e.g. "P-256:X25519:P-384"; empty keeps the library default.
+  string tls_groups = 12;
+  // Dial the endpoint through Xray's dialer (sockopt.dialerProxy) instead of
+  // the system network, so the tunnel can run inside another outbound.
+  bool chain = 13;
+}
