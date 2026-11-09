@@ -18,14 +18,18 @@ import (
 
 // dialTCP opens the h2 transport's TCP connection.
 func (t *tunnel) dialTCP(ctx context.Context) (gonet.Conn, error) {
+	addr := t.conf.Endpoint
+	if t.tcpEndpoint != "" {
+		addr = t.tcpEndpoint
+	}
 	if t.conf.Chain && t.dialer != nil {
-		dest, err := net.ParseDestination("tcp:" + t.conf.Endpoint)
+		dest, err := net.ParseDestination("tcp:" + addr)
 		if err != nil {
 			return nil, err
 		}
 		return t.dialer.Dial(context.Background(), dest)
 	}
-	return (&gonet.Dialer{}).DialContext(ctx, "tcp", t.conf.Endpoint)
+	return (&gonet.Dialer{}).DialContext(ctx, "tcp", addr)
 }
 
 // dialUDP opens the h3 transport's socket through Xray's dialer. The result is

@@ -51,6 +51,7 @@ const (
 	firstConnectMax = 10 * time.Second
 	idleLinger      = 90 * time.Second
 	dnsTimeout      = 4 * time.Second
+	handshakeIdle   = 2 * time.Second
 )
 
 func init() {
@@ -130,6 +131,11 @@ type tunnel struct {
 	ready   chan struct{} // closed once the first connection is up
 	lastErr error
 	dialer  internet.Dialer // Xray's dialer, used when conf.Chain is set
+
+	sni         string
+	trace       attemptTrace // see diag.go
+	tcpEndpoint string       // h2 address in use; empty means conf.Endpoint
+	peerKey     *ecdsa.PublicKey
 }
 
 func acquire(conf *Config, dialer internet.Dialer) (*tunnel, error) {
@@ -250,14 +256,19 @@ func (t *tunnel) launch() error {
 		return xerrors.New("masque: certificate").Base(err)
 	}
 	sni := t.conf.Sni
-	if sni == "" {
-		sni = defaultSNI
+	if sni == "" || sni == defaultSNI {
+		sni = sniFallback
 	}
+	t.peerKey = peerKey
 	tlsConfig, err := api.PrepareTlsConfig(privKey, peerKey, cert, sni)
 	if err != nil {
 		return xerrors.New("masque: tls").Base(err)
 	}
 	applyTLSGroups(tlsConfig, t.conf.TlsGroups)
+	t.sni = sni
+	t.trace.reset()
+	instrumentTLS(tlsConfig, &t.trace, peerKey)
+	t.logConfigSummary(context.Background(), privKey, peerKey, sni, tlsConfig, mtu)
 
 	tunDev, tnet, err := netstack.CreateNetTUN(local, dns, mtu)
 	if err != nil {
@@ -268,7 +279,10 @@ func (t *tunnel) launch() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.cancel = cancel
 	if h2 {
-		go t.maintainH2(ctx, tlsConfig, api.NewNetstackAdapter(tunDev), mtu)
+		go t.maintainH2(ctx, tlsConfig, api.NewNetstackAdapter(tunDev), mtu, tcpCandidates(t.conf.Endpoint, ""))
+	} else if tr, addr := rememberedGateway(); tr == "h2" && !t.conf.Chain {
+		xerrors.LogWarning(context.Background(), "masque[diag] remembered gateway ", addr, " over h2")
+		go t.maintainH2(ctx, tlsConfig, api.NewNetstackAdapter(tunDev), mtu, tcpCandidates(t.conf.Endpoint, addr))
 	} else {
 		go t.maintain(ctx, tlsConfig, endpoint, api.NewNetstackAdapter(tunDev), mtu)
 	}
@@ -279,21 +293,43 @@ func (t *tunnel) launch() error {
 // reconnecting on failure until the handler is closed.
 func (t *tunnel) maintain(ctx context.Context, tlsConfig *tls.Config, endpoint *gonet.UDPAddr, dev api.TunnelDevice, mtu int) {
 	signalled := false
+	attempt := 0
+	var candidates []*gonet.UDPAddr
+	tried := map[string]bool{}
+	scanned := false
+	if endpoint != nil {
+		if tr, addr := rememberedGateway(); tr == "h3" && addr != endpoint.String() {
+			if a, err := gonet.ResolveUDPAddr("udp", addr); err == nil {
+				xerrors.LogWarning(ctx, "masque[diag] remembered gateway ", addr, " over h3")
+				candidates = append(candidates, a)
+			}
+		}
+		candidates = append(candidates, endpoint)
+	}
+	current := 0
 	for ctx.Err() == nil {
+		attempt++
+		started := time.Now()
+		t.trace.reset()
+		if candidates != nil {
+			endpoint = candidates[current]
+		}
 		// Start at the QUIC minimum: a full-size Initial is silently dropped on paths
 		// with a smaller MTU (tunnels, many mobile networks) and the handshake never
 		// completes. Path-MTU discovery stays on, so packets still grow afterwards.
-		quicConfig := &quic.Config{EnableDatagrams: true, KeepAlivePeriod: keepalive, InitialPacketSize: 1200}
+		// A short handshake timeout: an address whose UDP is dropped is given up
+		// on quickly, so the next address and then h2 are reached in seconds.
+		quicConfig := &quic.Config{EnableDatagrams: true, KeepAlivePeriod: keepalive, InitialPacketSize: 1200, HandshakeIdleTimeout: handshakeIdle}
 		var udpConn gonet.PacketConn
 		var tr *http3.Transport
 		var ipConn *connectip.Conn
 		var rsp *http.Response
 		var err error
 		if t.conf.Chain && t.dialer != nil {
-			udpConn, tr, ipConn, rsp, err = t.connectChained(ctx, tlsConfig, quicConfig)
+			udpConn, tr, ipConn, rsp, err = t.connectChained(ctx, t.attemptTLS(tlsConfig, attempt), quicConfig)
 		} else {
 			var sysConn *gonet.UDPConn
-			sysConn, tr, ipConn, rsp, err = api.ConnectTunnel(ctx, tlsConfig, quicConfig, connectURI, endpoint)
+			sysConn, tr, ipConn, rsp, err = api.ConnectTunnel(ctx, t.attemptTLS(tlsConfig, attempt), quicConfig, connectURI, endpoint)
 			if sysConn != nil {
 				udpConn = sysConn
 			}
@@ -315,6 +351,34 @@ func (t *tunnel) maintain(ctx context.Context, tlsConfig *tls.Config, endpoint *
 			t.lastErr = err
 			t.mu.Unlock()
 			xerrors.LogInfo(ctx, "masque: connect failed: ", err)
+			t.logAttempt(ctx, attempt, started, err, t.sni)
+			// The address refused the handshake or never answered: try the next one,
+			// then scan the gateways, then carry on over TCP.
+			if candidates != nil && !t.conf.Chain && endpointUnusable(err, &t.trace) {
+				tried[endpoint.String()] = true
+				if current++; current < len(candidates) {
+					xerrors.LogWarning(ctx, "masque[diag] endpoint ", endpoint, " unusable, switching to ", candidates[current])
+					continue
+				}
+				current = 0
+				if !scanned {
+					scanned = true
+					if found := t.scanH3(ctx, tlsConfig, tried); len(found) > 0 {
+						candidates = found
+						continue
+					}
+					// Only before the first connection: maintainH2 closes t.ready itself.
+					if !signalled {
+						xerrors.LogWarning(ctx, "masque[diag] no gateway answers over QUIC, falling back to transport=h2")
+						h2 := t.scanH2(ctx, tlsConfig)
+						if len(h2) == 0 {
+							h2 = tcpCandidates(t.conf.Endpoint, "")
+						}
+						t.maintainH2(ctx, tlsConfig, dev, mtu, h2)
+						return
+					}
+				}
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -322,6 +386,11 @@ func (t *tunnel) maintain(ctx context.Context, tlsConfig *tls.Config, endpoint *
 			}
 			continue
 		}
+		if endpoint != nil && !t.conf.Chain {
+			rememberGateway("h3", endpoint.String())
+		}
+		xerrors.LogWarning(ctx, "masque[diag] connected endpoint=", endpoint, " attempt=", attempt, " elapsed=", time.Since(started).Round(time.Millisecond), " ", t.trace.negotiated.Load())
+		attempt = 0
 		if !signalled {
 			close(t.ready)
 			signalled = true
@@ -399,20 +468,37 @@ func (t *tunnel) connectChained(ctx context.Context, tlsConfig *tls.Config, quic
 
 // maintainH2 is maintain for the HTTP/2 transport: one TLS/TCP connection per
 // session, every failure on it fatal to that session.
-func (t *tunnel) maintainH2(ctx context.Context, tlsConfig *tls.Config, dev api.TunnelDevice, mtu int) {
+func (t *tunnel) maintainH2(ctx context.Context, tlsConfig *tls.Config, dev api.TunnelDevice, mtu int, tcpCandidates []string) {
 	authority := connectURI[len("https://"):]
 	signalled := false
+	attempt := 0
+	if len(tcpCandidates) == 0 {
+		tcpCandidates = []string{t.conf.Endpoint}
+	}
+	current := 0
 	for ctx.Err() == nil {
+		attempt++
+		started := time.Now()
+		t.trace.reset()
+		t.tcpEndpoint = tcpCandidates[current]
 		wrap := func(c gonet.Conn) gonet.Conn { return c }
 		if t.conf.Fragment {
 			wrap = func(c gonet.Conn) gonet.Conn { return newFragmentConn(c, t.conf.FragmentSize, t.conf.FragmentDelay) }
 		}
-		sess, err := dialH2(ctx, tlsConfig, t.dialTCP, authority, wrap)
+		sess, err := dialH2(ctx, t.attemptTLS(tlsConfig, attempt), t.dialTCP, authority, wrap)
 		if err != nil {
 			t.mu.Lock()
 			t.lastErr = err
 			t.mu.Unlock()
 			xerrors.LogInfo(ctx, "masque: h2 connect failed: ", err)
+			t.logAttempt(ctx, attempt, started, err, t.sni)
+			if len(tcpCandidates) > 1 && !t.trace.handshakeDone.Load() {
+				current = (current + 1) % len(tcpCandidates)
+				xerrors.LogWarning(ctx, "masque[diag] h2 endpoint ", t.tcpEndpoint, " failed, switching to ", tcpCandidates[current])
+				if current != 0 {
+					continue
+				}
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -420,6 +506,11 @@ func (t *tunnel) maintainH2(ctx context.Context, tlsConfig *tls.Config, dev api.
 			}
 			continue
 		}
+		if !t.conf.Chain {
+			rememberGateway("h2", t.tcpEndpoint)
+		}
+		xerrors.LogWarning(ctx, "masque[diag] h2 connected endpoint=", t.tcpEndpoint, " attempt=", attempt, " elapsed=", time.Since(started).Round(time.Millisecond), " ", t.trace.negotiated.Load())
+		attempt = 0
 		if !signalled {
 			close(t.ready)
 			signalled = true
